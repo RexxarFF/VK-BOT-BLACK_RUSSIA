@@ -7,6 +7,7 @@ from app.keyboards import (
     permissions_keyboard,
     points_user,
     report_chat_panel,
+    role_level_picker,
     user_card,
     users_list,
 )
@@ -32,6 +33,7 @@ def test_main_keyboards_are_valid_json():
     assert_keyboard(leadership_main())
     assert_keyboard(report_chat_panel())
     assert_keyboard(points_user(123))
+    assert_keyboard(role_level_picker())
     assert_keyboard(user_card(123, in_contest=True))
 
 

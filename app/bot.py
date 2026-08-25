@@ -28,6 +28,7 @@ from .keyboards import (
     report_chat_panel,
     report_preview,
     remove_user_confirm,
+    role_level_picker,
     role_picker,
     roles_panel,
     settings_panel,
@@ -48,6 +49,8 @@ bot = Bot(token=settings.token, polling=BotPolling(group_id=settings.group_id or
 bot.labeler.message_view.replace_mention = True
 store = JsonStore(settings.data_dir)
 svc = AppService(store, settings.owner_ids)
+
+UI_SCHEMA_VERSION = 33
 
 # Text-input wizards. Key: (vk_user_id, peer_id)
 states: dict[tuple[int, int], dict] = {}
@@ -104,16 +107,15 @@ async def display_name(vk_id: int) -> str:
 
 
 async def safe_delete_message(message: Message) -> bool:
-    """Best-effort removal of a user's input message.
+    """Best-effort cleanup for group conversations only.
 
-    For community bots VK can reject deletion by global ``message_id`` with
-    error 15 ("peer message"). For an incoming message we therefore address
-    it by the conversation-local id (cmid) together with peer_id. If VK still
-    denies deletion for this peer, remember that and stop retrying there so
-    form handling stays fast and logs do not fill with the same API error.
+    VK community bots cannot delete a user's incoming message in a personal
+    dialog. Trying to do so produces API error 15 (peer message), so DMs are
+    skipped completely. In group conversations we still try by cmid; if VK
+    denies it there too, cleanup is disabled for that peer.
     """
     peer_id = int(getattr(message, 'peer_id', 0) or 0)
-    if not peer_id or peer_id in delete_input_disabled_peers:
+    if not peer_id or is_private_peer(peer_id) or peer_id in delete_input_disabled_peers:
         return False
 
     cmid = int(getattr(message, 'conversation_message_id', 0) or 0)
@@ -121,31 +123,23 @@ async def safe_delete_message(message: Message) -> bool:
         return False
 
     try:
-        await bot.api.messages.delete(
-            peer_id=peer_id,
-            cmids=[cmid],
-            delete_for_all=1,
-        )
+        await bot.api.messages.delete(peer_id=peer_id, cmids=[cmid], delete_for_all=1)
         return True
     except Exception as exc:
         code = getattr(exc, 'code', None)
         text = str(getattr(exc, 'error_msg', '') or exc).lower()
         if code == 15 or 'message can not be deleted' in text or 'peer message' in text:
             delete_input_disabled_peers.add(peer_id)
-            logger.debug(
-                'VK запретил удалять входящие сообщения в peer {}. '
-                'Дальнейшие попытки удаления для этого peer отключены.',
-                peer_id,
-            )
+            logger.debug('VK не разрешает удалять чужие сообщения в peer {}. Очистка входящих сообщений отключена.', peer_id)
             return False
         logger.debug('Не удалось удалить входящее сообщение в peer {}: {}', peer_id, exc)
         return False
 
 
 def schedule_delete_message(message: Message) -> None:
-    """Queue cleanup without delaying the next form/UI response."""
+    """Queue cleanup only where VK can potentially allow it."""
     peer_id = int(getattr(message, 'peer_id', 0) or 0)
-    if not peer_id or peer_id in delete_input_disabled_peers:
+    if not peer_id or is_private_peer(peer_id) or peer_id in delete_input_disabled_peers:
         return
     if not int(getattr(message, 'conversation_message_id', 0) or 0):
         return
@@ -160,25 +154,30 @@ def empty_persistent_keyboard() -> str:
     return json.dumps({'one_time': True, 'buttons': []}, ensure_ascii=False)
 
 
-async def clear_legacy_keyboard(peer_id: int) -> None:
-    """Remove obsolete bottom keyboards once per peer without leaving a service message behind."""
+async def clear_legacy_keyboard(peer_id: int, *, keep_message: bool = True) -> int | None:
+    """Hide any old persistent bottom keyboard from v1/v2.
+
+    Important: the clearing message must NOT be deleted immediately. VK clients
+    can restore the previous persistent keyboard after deletion. We keep the
+    message and then reuse/edit it into the current inline panel.
+    """
     peer_id = int(peer_id)
     if peer_id in legacy_keyboard_cleared:
-        return
-    legacy_keyboard_cleared.add(peer_id)
+        return dm_panels.get(peer_id) if is_private_peer(peer_id) else None
     try:
         mid = await bot.api.messages.send(
             peer_id=peer_id,
-            message='·',
+            message='♻️ Интерфейс бота обновлён.',
             keyboard=empty_persistent_keyboard(),
             random_id=0,
         )
-        try:
-            await bot.api.messages.delete(message_ids=[int(mid)], delete_for_all=1)
-        except Exception:
-            pass
+        legacy_keyboard_cleared.add(peer_id)
+        if is_private_peer(peer_id):
+            dm_panels[peer_id] = int(mid)
+        return int(mid)
     except Exception as exc:
         logger.debug('Не удалось убрать старую клавиатуру в peer {}: {}', peer_id, exc)
+        return None
 
 
 async def safe_edit(peer_id: int, *, text: str, keyboard: str | None = None, message_id: int | None = None,
@@ -651,13 +650,20 @@ async def process_state(message: Message) -> bool:
                 data['name'] = clean_text(text, field='Название должности', min_len=2, max_len=50)
                 st['step'] = 2
                 schedule_delete_message(message)
-                await edit_state_panel(message.from_id, message.peer_id, '🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nВведите уровень должности от 1 до 10.\nЧем выше уровень — тем выше должность:', report_cancel())
+                await edit_state_panel(
+                    message.from_id, message.peer_id,
+                    f'🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nНазвание: {data["name"]}\n\nВыбери уровень должности от 1 до 10 кнопкой ниже:',
+                    role_level_picker(),
+                )
                 return True
-            level = parse_level(text)
-            await svc.create_role(message.from_id, data['name'], level)
+            # Уровень выбирается только кнопкой. Любой текст внутри этого шага
+            # просто поглощается формой и никогда не попадает в команды.
             schedule_delete_message(message)
-            states.pop(key, None)
-            await edit_state_panel(message.from_id, message.peer_id, f'✅ Должность «{data["name"]}» создана.\n\nТеперь настрой ей права через кнопку «🔐 Настроить права» или /setperm.', roles_panel())
+            await edit_state_panel(
+                message.from_id, message.peer_id,
+                f'🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nНазвание: {data.get("name", "")}\n\nВыбери уровень кнопкой от 1 до 10:',
+                role_level_picker(),
+            )
             return True
 
         if kind == 'role_assign':
@@ -714,13 +720,75 @@ async def ensure_leadership_panel(peer_id: int) -> int:
 
 
 
-async def cleanup_configured_peer_keyboards() -> None:
-    """Remove v1/v2 persistent keyboards from configured service chats on every deploy."""
-    cfg = await svc.settings()
-    peers = {int(p) for p in cfg.get('peers', {}).values() if p}
-    if not peers:
+async def migrate_legacy_ui() -> None:
+    """One-time UI migration from v1/v2/v3.0 keyboards to the current UI.
+
+    Old regular keyboards are persistent on the VK client and can survive code
+    updates. The only reliable way to hide them is to send an empty regular
+    keyboard. We then edit that same bot-owned message into the current inline
+    menu/panel, so the migration does not leave an extra service message.
+    """
+    if await svc.ui_schema_version() >= UI_SCHEMA_VERSION:
         return
-    await asyncio.gather(*(clear_legacy_keyboard(peer_id) for peer_id in peers), return_exceptions=True)
+
+    # Personal dialogs for every currently registered user.
+    users = await svc.active_users()
+    ids = {int(u['vk_id']) for u in users}
+    ids.update(int(x) for x in settings.owner_ids)
+    for uid in sorted(ids):
+        try:
+            mid = await bot.api.messages.send(
+                peer_id=uid, message='♻️ Интерфейс бота обновлён.',
+                keyboard=empty_persistent_keyboard(), random_id=0,
+            )
+            dm_panels[uid] = int(mid)
+            legacy_keyboard_cleared.add(uid)
+            try:
+                user = await svc.get_user(uid)
+                name = (user or {}).get('nickname') or (user or {}).get('name') or await display_name(uid)
+                await safe_edit(
+                    uid,
+                    text=f'👋 Привет, {name}!\n\nИнтерфейс обновлён. Выбери нужный раздел:',
+                    keyboard=helper_menu(await svc.is_staff(uid)),
+                    message_id=int(mid),
+                    attachment='',
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.debug('Не удалось обновить интерфейс в ЛС id{}: {}', uid, exc)
+
+    # Configured service chats: clear any old bottom keyboard and replace the
+    # clearing message with the current inline panel.
+    cfg = await svc.settings()
+    peers = cfg.get('peers', {})
+    reports_peer = peers.get('reports')
+    if reports_peer:
+        try:
+            mid = await bot.api.messages.send(
+                peer_id=int(reports_peer), message='♻️ Интерфейс обновлён.',
+                keyboard=empty_persistent_keyboard(), random_id=0,
+            )
+            text = '📝 ОТЧЁТЫ АГЕНТОВ ПОДДЕРЖКИ\n\nНажми кнопку ниже, чтобы подать отчёт. Заполнение пройдёт приватно в ЛС бота.'
+            await safe_edit(int(reports_peer), text=text, keyboard=report_chat_panel(), message_id=int(mid))
+            await svc.set_panel_message('reports', int(mid))
+        except Exception as exc:
+            logger.debug('Не удалось обновить беседу отчётов: {}', exc)
+
+    leadership_peer = peers.get('leadership')
+    if leadership_peer:
+        try:
+            mid = await bot.api.messages.send(
+                peer_id=int(leadership_peer), message='♻️ Интерфейс обновлён.',
+                keyboard=empty_persistent_keyboard(), random_id=0,
+            )
+            await safe_edit(int(leadership_peer), text=await leadership_home_text(), keyboard=leadership_main(), message_id=int(mid))
+            await svc.set_panel_message('leadership', int(mid))
+        except Exception as exc:
+            logger.debug('Не удалось обновить беседу руководства: {}', exc)
+
+    await svc.set_ui_schema_version(UI_SCHEMA_VERSION)
+    logger.info('Интерфейс VK обновлён до схемы {}. Старые постоянные клавиатуры сброшены.', UI_SCHEMA_VERSION)
 
 
 def split_vk_target(raw_command_text: str, command: str) -> tuple[str, str]:
@@ -904,12 +972,18 @@ async def handle_command(message: Message, text: str) -> bool:
         cfg = await svc.settings()
         leadership = cfg.get('peers', {}).get('leadership')
         panel_id = cfg.get('panel_messages', {}).get('leadership') if leadership and int(leadership) == int(message.peer_id) else None
+        if is_private_peer(message.peer_id):
+            panel_id = dm_panels.get(int(message.from_id)) or panel_id
         states[state_key(message.from_id, message.peer_id)] = {
             'kind': 'role_create', 'step': 2 if name else 1,
             'data': {'name': name} if name else {}, 'panel_message_id': panel_id,
         }
         if name:
-            await edit_state_panel(message.from_id, message.peer_id, f'🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nНазвание: {name}\nВведите уровень должности от 1 до 10:', report_cancel())
+            await edit_state_panel(
+                message.from_id, message.peer_id,
+                f'🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nНазвание: {name}\n\nВыбери уровень должности от 1 до 10:',
+                role_level_picker(),
+            )
         else:
             await edit_state_panel(message.from_id, message.peer_id, '🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nВведите название новой должности:', report_cancel())
         return True
@@ -946,19 +1020,20 @@ async def handle_command(message: Message, text: str) -> bool:
         await bot.api.messages.send(peer_id=message.peer_id, message=text_perm, keyboard=permissions_keyboard(role_name, PERMISSION_CATALOG, selected), random_id=0)
         return True
 
-    # Unknown commands never overwrite the shared leadership panel and never
-    # clutter a chat. The hint goes only to the sender's DM.
-    await clean_user_response(message, '❌ Неизвестная команда. Используй /help.')
+    # Неизвестные команды намеренно игнорируются. Никаких сообщений
+    # «Не понял команду» / «Неизвестная команда» бот не отправляет.
     return True
 
 
 @bot.on.message()
 async def message_handler(message: Message):
     try:
-        # Old v1/v2 permanent keyboards can remain cached by VK clients even after
-        # deploying new code. Clear them on the first interaction in every peer.
-        asyncio.create_task(clear_legacy_keyboard(message.peer_id))
         text = strip_group_mention((message.text or '').strip())
+        # In personal dialogs clear obsolete v1/v2 bottom keyboards before the
+        # first normal interaction. The clearing message is then reused by the
+        # current UI, so no service-message clutter remains.
+        if is_private_peer(message.peer_id) and state_key(message.from_id, message.peer_id) not in states and message.peer_id not in legacy_keyboard_cleared:
+            await clear_legacy_keyboard(message.peer_id)
         # Wizard input has absolute priority over command parsing.
         if await process_state(message):
             return
@@ -1273,6 +1348,23 @@ async def callback_handler(event: MessageEvent):
             await svc.require(user_id, 'roles.create')
             states[state_key(user_id, peer_id)] = {'kind': 'role_create', 'step': 1, 'data': {}, 'panel_cmid': cmid}
             await event_edit(event, '🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nВведите название новой должности:', report_cancel())
+            return
+
+        if action == 'role_level_pick':
+            await svc.require(user_id, 'roles.create')
+            st = states.get(state_key(user_id, peer_id))
+            if not st or st.get('kind') != 'role_create' or int(st.get('step', 0)) != 2:
+                await snackbar(event, 'Форма создания должности устарела. Открой её заново.')
+                return
+            level = parse_level(payload.get('level'))
+            name = st.get('data', {}).get('name', '')
+            await svc.create_role(user_id, name, level)
+            states.pop(state_key(user_id, peer_id), None)
+            await event_edit(
+                event,
+                f'✅ Должность «{name}» создана.\nУровень: {level}/10\n\nТеперь при необходимости настрой её права.',
+                roles_panel(),
+            )
             return
 
         if action == 'role_assign_start':

@@ -107,4 +107,5 @@ DEFAULT_SETTINGS = {
     'active_contest_id': None,
     'contest_seq': 0,
     'report_seq': 0,
+    'ui_schema_version': 0,
 }

@@ -15,14 +15,14 @@ try:
 except Exception:
     pass
 
-from app.bot import bot, svc, cleanup_configured_peer_keyboards
+from app.bot import bot, svc, migrate_legacy_ui
 
 
 async def main():
     await svc.bootstrap()
-    await cleanup_configured_peer_keyboards()
-    logger.info('Запуск VK-бота Агентов Поддержки v3.2')
-    logger.info('Сайт и Mini App отключены — бот работает только через VK Long Poll.')
+    await migrate_legacy_ui()
+    logger.info('Запуск VK-бота Агентов Поддержки v3.3')
+    logger.info('Бот работает через VK Long Poll.')
     try:
         await bot.run_polling()
     except Exception as exc:

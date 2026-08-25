@@ -619,5 +619,14 @@ class AppService:
             settings.setdefault('panel_messages', {})[kind] = message_id
         await self.store.update('settings', DEFAULT_SETTINGS, mutate)
 
+    async def ui_schema_version(self) -> int:
+        cfg = await self.settings()
+        return int(cfg.get('ui_schema_version', 0) or 0)
+
+    async def set_ui_schema_version(self, version: int):
+        def mutate(settings):
+            settings['ui_schema_version'] = int(version)
+        await self.store.update('settings', DEFAULT_SETTINGS, mutate)
+
     async def permission_catalog(self) -> dict[str, str]:
         return dict(PERMISSION_CATALOG)

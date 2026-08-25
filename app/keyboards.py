@@ -206,6 +206,17 @@ def points_user(target: int) -> str:
     ])
 
 
+
+def role_level_picker() -> str:
+    return inline([
+        [cb('1', 'role_level_pick', level=1), cb('2', 'role_level_pick', level=2)],
+        [cb('3', 'role_level_pick', level=3), cb('4', 'role_level_pick', level=4)],
+        [cb('5', 'role_level_pick', level=5), cb('6', 'role_level_pick', level=6)],
+        [cb('7', 'role_level_pick', level=7), cb('8', 'role_level_pick', level=8)],
+        [cb('9', 'role_level_pick', level=9), cb('10', 'role_level_pick', level=10)],
+        [cb('❌ Отмена', 'flow_cancel', color='negative')],
+    ])
+
 def roles_panel() -> str:
     return inline([
         [cb('➕ Создать должность', 'role_create', color='positive')],
