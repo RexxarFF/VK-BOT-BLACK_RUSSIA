@@ -30,6 +30,13 @@ class AppService:
                             if perm not in existing:
                                 existing.append(perm)
                         data[name]['permissions'] = existing
+                # v3.1 migration: every role now uses the compact 1..10 hierarchy.
+                # Old custom roles from earlier builds are clamped automatically.
+                for role in data.values():
+                    try:
+                        role['level'] = max(1, min(10, int(role.get('level', 1))))
+                    except (TypeError, ValueError):
+                        role['level'] = 1
                 return data
             await self.store.update('roles', DEFAULT_ROLES, merge_roles)
 
@@ -164,7 +171,7 @@ class AppService:
             raise NotFoundError('Этот пользователь не зарегистрирован или уже исключён из системы.')
         roles = await self.roles()
         actor_user = await self.get_user(actor)
-        actor_level = 100 if actor in self.owner_ids else int(roles.get((actor_user or {}).get('role'), {}).get('level', 0))
+        actor_level = 10 if actor in self.owner_ids else int(roles.get((actor_user or {}).get('role'), {}).get('level', 0))
         target_level = int(roles.get(user.get('role'), {}).get('level', 0))
         if actor not in self.owner_ids and target_level >= actor_level:
             raise PermissionDenied('Нельзя исключить пользователя с должностью твоего уровня или выше.')
@@ -252,7 +259,7 @@ class AppService:
         if any(existing.casefold() == name.casefold() for existing in roles):
             raise ConflictError('Должность с таким названием уже существует.')
         actor_user = await self.get_user(actor)
-        actor_level = 100 if actor in self.owner_ids else int(roles.get((actor_user or {}).get('role'), {}).get('level', 0))
+        actor_level = 10 if actor in self.owner_ids else int(roles.get((actor_user or {}).get('role'), {}).get('level', 0))
         if actor not in self.owner_ids and level >= actor_level:
             raise PermissionDenied('Нельзя создать должность своего уровня или выше.')
         def mutate(data):
@@ -293,7 +300,7 @@ class AppService:
         if not target_user or not target_user.get('registered'):
             raise NotFoundError('Сначала добавь этого человека в систему через /adduser или /addmember.')
         actor_user = await self.get_user(actor)
-        actor_level = 100 if actor in self.owner_ids else int(roles.get((actor_user or {}).get('role'), {}).get('level', 0))
+        actor_level = 10 if actor in self.owner_ids else int(roles.get((actor_user or {}).get('role'), {}).get('level', 0))
         target_level = int(roles.get(target_user.get('role'), {}).get('level', 0))
         new_level = int(roles[role_name].get('level', 0))
         if actor not in self.owner_ids and (target_level >= actor_level or new_level >= actor_level):

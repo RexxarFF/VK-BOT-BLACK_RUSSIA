@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
 from loguru import logger
@@ -54,6 +55,8 @@ states: dict[tuple[int, int], dict] = {}
 permission_sessions: dict[tuple[int, int, str], set[str]] = {}
 # Last bot-owned panel in each user's DM. Keeps slash commands from creating chat clutter.
 dm_panels: dict[int, int] = {}
+# Peers where an obsolete persistent keyboard from v1/v2 has already been cleared.
+legacy_keyboard_cleared: set[int] = set()
 
 
 def is_private_peer(peer_id: int) -> bool:
@@ -104,6 +107,40 @@ async def safe_delete_message(message: Message):
             await bot.api.messages.delete(message_ids=[int(message.id)], delete_for_all=1)
     except Exception:
         pass
+
+
+def schedule_delete_message(message: Message) -> None:
+    """Delete user input in background so UI updates are not delayed by an extra VK API request."""
+    try:
+        asyncio.create_task(safe_delete_message(message))
+    except RuntimeError:
+        pass
+
+
+def empty_persistent_keyboard() -> str:
+    # A non-inline empty keyboard hides old permanent keyboards left by v1/v2.
+    return json.dumps({'one_time': True, 'buttons': []}, ensure_ascii=False)
+
+
+async def clear_legacy_keyboard(peer_id: int) -> None:
+    """Remove obsolete bottom keyboards once per peer without leaving a service message behind."""
+    peer_id = int(peer_id)
+    if peer_id in legacy_keyboard_cleared:
+        return
+    legacy_keyboard_cleared.add(peer_id)
+    try:
+        mid = await bot.api.messages.send(
+            peer_id=peer_id,
+            message='·',
+            keyboard=empty_persistent_keyboard(),
+            random_id=0,
+        )
+        try:
+            await bot.api.messages.delete(message_ids=[int(mid)], delete_for_all=1)
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.debug('Не удалось убрать старую клавиатуру в peer {}: {}', peer_id, exc)
 
 
 async def safe_edit(peer_id: int, *, text: str, keyboard: str | None = None, message_id: int | None = None,
@@ -457,7 +494,7 @@ async def process_state(message: Message) -> bool:
         return False
     text = (message.text or '').strip()
     if text.lower() in {'/cancel', 'cancel', 'отмена'}:
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         states.pop(key, None)
         await show_helper_menu(message.peer_id, message.from_id, message_id=st.get('panel_message_id'), cmid=st.get('panel_cmid'))
         return True
@@ -471,23 +508,23 @@ async def process_state(message: Message) -> bool:
             if step == 1:
                 data['nickname'] = validate_nickname(text)
                 st['step'] = 2
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, '📝 ПОДАЧА ОТЧЁТА\n\nШаг 2/3\nУкажи дату выполненной работы в формате ДД.ММ.ГГГГ:', report_cancel())
                 return True
             if step == 2:
                 data['work_date'] = parse_report_date(text)
                 st['step'] = 3
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, '📝 ПОДАЧА ОТЧЁТА\n\nШаг 3/3\nПришли следующим сообщением скриншот доказательства как фотографию VK.', report_cancel())
                 return True
             proof = photo_attachment_string(message)
             if not proof:
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, '❌ Я не вижу фотографию.\n\nПришли скриншот именно как фото/изображение VK, а не ссылкой или обычным текстом.', report_cancel())
                 return True
             data['proof'] = proof
             st['step'] = 4
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             preview = (
                 '📋 ПРЕДПРОСМОТР ОТЧЁТА\n\n'
                 f'👤 Nick_Name: {data["nickname"]}\n'
@@ -502,26 +539,26 @@ async def process_state(message: Message) -> bool:
             if step == 1:
                 data['name'] = clean_text(text, field='Название конкурса', min_len=3, max_len=80)
                 st['step'] = 2
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, '🏆 СОЗДАНИЕ КОНКУРСА\n\nШаг 2/4\nВведите описание конкурса:', report_cancel())
                 return True
             if step == 2:
                 data['description'] = clean_text(text, field='Описание конкурса', min_len=3, max_len=1200)
                 st['step'] = 3
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, '🏆 СОЗДАНИЕ КОНКУРСА\n\nШаг 3/4\nВведите дату окончания в формате ДД.ММ.ГГГГ:', report_cancel())
                 return True
             if step == 3:
                 data['end_date'] = parse_contest_date(text)
                 st['step'] = 4
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, '🏆 СОЗДАНИЕ КОНКУРСА\n\nШаг 4/4\nВыберите шаблон конкурса:', template_picker())
                 return True
 
         if kind == 'contest_edit':
             field = data.get('field')
             await svc.edit_contest(message.from_id, field, text)
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             states.pop(key, None)
             await edit_state_panel(message.from_id, message.peer_id, f'✅ Настройка конкурса обновлена.\n\n{await contest_text()}', contest_settings_keyboard())
             return True
@@ -532,12 +569,12 @@ async def process_state(message: Message) -> bool:
                 data['vk_id'] = target['vk_id']
                 data['vk_name'] = target['name']
                 st['step'] = 2
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, f'✅ Найден пользователь: {target["name"]}\n🆔 {target["vk_id"]}\n\nВведите его игровой Nick_Name:', report_cancel())
                 return True
             nickname = validate_nickname(text)
             user = await svc.register_user(message.from_id, data['vk_id'], data['vk_name'], nickname)
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             states.pop(key, None)
             text_user, card_data = await user_text(data['vk_id'])
             await edit_state_panel(message.from_id, message.peer_id, f'✅ АГЕНТ ДОБАВЛЕН\n\n{text_user}', user_card(data['vk_id'], in_contest=card_data['in_active_contest']))
@@ -550,12 +587,12 @@ async def process_state(message: Message) -> bool:
                 data['vk_id'] = target['vk_id']
                 data['vk_name'] = target['name']
                 st['step'] = 2
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await edit_state_panel(message.from_id, message.peer_id, f'✅ Найден пользователь: {target["name"]}\n🆔 {target["vk_id"]}\n\nВведите его игровой Nick_Name:', report_cancel())
                 return True
             nickname = validate_nickname(text)
             user = await svc.add_member(message.from_id, data['vk_id'], data['vk_name'], nickname)
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             states.pop(key, None)
             await edit_state_panel(message.from_id, message.peer_id, f'✅ УЧАСТНИК ДОБАВЛЕН\n\n👤 {nickname}\nVK: {data["vk_name"]}\n🆔 {data["vk_id"]}', contest_panel(True))
             await send_log(f'👥 В конкурс добавлен {nickname} (id{data["vk_id"]})\nДействие: id{message.from_id}')
@@ -565,7 +602,7 @@ async def process_state(message: Message) -> bool:
             amount = parse_points(text, max_abs=settings.max_points_change)
             target = int(data['target'])
             before, after = await svc.change_points(message.from_id, target, amount)
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             states.pop(key, None)
             await edit_state_panel(message.from_id, message.peer_id, f'✅ Баллы изменены: {before} → {after} ({amount:+d})', points_user(target))
             await send_log(f'⭐ id{target}: {before} → {after} ({amount:+d})\nДействие: id{message.from_id}')
@@ -575,36 +612,45 @@ async def process_state(message: Message) -> bool:
             if step == 1:
                 data['name'] = clean_text(text, field='Название должности', min_len=2, max_len=50)
                 st['step'] = 2
-                await safe_delete_message(message)
-                await edit_state_panel(message.from_id, message.peer_id, '🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nВведите уровень должности от 1 до 99.\nЧем выше уровень — тем выше должность:', report_cancel())
+                schedule_delete_message(message)
+                await edit_state_panel(message.from_id, message.peer_id, '🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nВведите уровень должности от 1 до 10.\nЧем выше уровень — тем выше должность:', report_cancel())
                 return True
             level = parse_level(text)
             await svc.create_role(message.from_id, data['name'], level)
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             states.pop(key, None)
             await edit_state_panel(message.from_id, message.peer_id, f'✅ Должность «{data["name"]}» создана.\n\nТеперь настрой ей права через кнопку «🔐 Настроить права» или /setperm.', roles_panel())
             return True
 
         if kind == 'role_assign':
-            target = await resolve_vk_user(bot.api, text)
-            await safe_delete_message(message)
-            data['target'] = target['vk_id']
-            data['target_name'] = target['name']
-            roles = await svc.roles()
-            st['step'] = 2
-            await edit_state_panel(message.from_id, message.peer_id, f'🎭 НАЗНАЧЕНИЕ ДОЛЖНОСТИ\n\nПользователь: {target["name"]}\nВыберите должность:', role_picker(roles.keys(), 'role_assign_pick', target=target['vk_id']))
-            return True
+            if step == 1:
+                target = await resolve_vk_user(bot.api, text)
+                schedule_delete_message(message)
+                data['target'] = target['vk_id']
+                data['target_name'] = target['name']
+                roles = await svc.roles()
+                st['step'] = 2
+                await edit_state_panel(message.from_id, message.peer_id, f'🎭 НАЗНАЧЕНИЕ ДОЛЖНОСТИ\n\nПользователь: {target["name"]}\nВыберите должность:', role_picker(roles.keys(), 'role_assign_pick', target=target['vk_id']))
+                return True
+
+        # Some wizard stages wait for a callback button instead of text input.
+        # Consume and remove any typed text here so it can NEVER fall through to
+        # the slash-command parser and produce "Неизвестная команда" mid-form.
+        schedule_delete_message(message)
+        return True
 
     except Exception as exc:
         # Keep wizard alive on validation errors so the user can simply retry.
         if isinstance(exc, AppError):
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             await edit_state_panel(message.from_id, message.peer_id, f'❌ {exc.message}\n\nИсправь данные и попробуй ещё раз.', report_cancel())
             return True
         states.pop(key, None)
         await user_facing_error(message.peer_id, exc, panel_message_id=st.get('panel_message_id'), panel_cmid=st.get('panel_cmid'))
         return True
-    return False
+    # Active wizard input is always consumed.
+    schedule_delete_message(message)
+    return True
 
 
 async def ensure_report_panel(peer_id: int) -> int:
@@ -627,6 +673,16 @@ async def ensure_leadership_panel(peer_id: int) -> int:
     mid = await bot.api.messages.send(peer_id=peer_id, message=text, keyboard=leadership_main(), random_id=0)
     await svc.set_panel_message('leadership', int(mid))
     return int(mid)
+
+
+
+async def cleanup_configured_peer_keyboards() -> None:
+    """Remove v1/v2 persistent keyboards from configured service chats on every deploy."""
+    cfg = await svc.settings()
+    peers = {int(p) for p in cfg.get('peers', {}).values() if p}
+    if not peers:
+        return
+    await asyncio.gather(*(clear_legacy_keyboard(peer_id) for peer_id in peers), return_exceptions=True)
 
 
 def split_vk_target(raw_command_text: str, command: str) -> tuple[str, str]:
@@ -653,13 +709,13 @@ async def handle_command(message: Message, text: str) -> bool:
     args = parts[1:]
 
     # Commands are control input, not chat history. Remove them whenever VK allows it.
-    await safe_delete_message(message)
+    schedule_delete_message(message)
 
     if command in {'/start', '/menu'}:
         if not is_private_peer(message.peer_id):
-            await safe_delete_message(message)
+            schedule_delete_message(message)
             return True
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         await show_helper_menu(message.peer_id, message.from_id)
         return True
 
@@ -689,24 +745,24 @@ async def handle_command(message: Message, text: str) -> bool:
                 '/roles — список должностей\n'
                 '/setchat <reports|leadership|logs> — назначить текущую беседу'
             )
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         await clean_user_response(message, text_help)
         return True
 
     if command == '/profile':
         await require_registered(message.from_id)
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         await clean_user_response(message, await profile_text(message.from_id))
         return True
 
     if command in {'/top', '/ranking'}:
         await require_registered(message.from_id)
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         await clean_user_response(message, await ranking_text())
         return True
 
     if command == '/report':
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         if not is_private_peer(message.peer_id):
             try:
                 await start_report_flow(message.from_id, message.from_id)
@@ -723,7 +779,7 @@ async def handle_command(message: Message, text: str) -> bool:
         return True
 
     if command == '/panel':
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         cfg = await svc.settings()
         leadership = cfg.get('peers', {}).get('leadership')
         if is_private_peer(message.peer_id):
@@ -738,7 +794,7 @@ async def handle_command(message: Message, text: str) -> bool:
         if not args:
             raise PermissionDenied('Укажи тип: /setchat reports, /setchat leadership или /setchat logs.')
         key = await svc.set_peer(message.from_id, args[0], message.peer_id)
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         if key == 'reports':
             await ensure_report_panel(message.peer_id)
         elif key == 'leadership':
@@ -790,7 +846,7 @@ async def handle_command(message: Message, text: str) -> bool:
 
     if command == '/newcontest':
         await svc.require(message.from_id, 'contest.create')
-        await safe_delete_message(message)
+        schedule_delete_message(message)
         mid = await ensure_leadership_panel(message.peer_id) if not is_private_peer(message.peer_id) else None
         states[state_key(message.from_id, message.peer_id)] = {'kind': 'contest_create', 'step': 1, 'data': {}, 'panel_message_id': mid}
         await edit_state_panel(message.from_id, message.peer_id, '🏆 СОЗДАНИЕ КОНКУРСА\n\nШаг 1/4\nВведите название конкурса:', report_cancel())
@@ -815,7 +871,7 @@ async def handle_command(message: Message, text: str) -> bool:
             'data': {'name': name} if name else {}, 'panel_message_id': panel_id,
         }
         if name:
-            await edit_state_panel(message.from_id, message.peer_id, f'🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nНазвание: {name}\nВведите уровень должности от 1 до 99:', report_cancel())
+            await edit_state_panel(message.from_id, message.peer_id, f'🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nНазвание: {name}\nВведите уровень должности от 1 до 10:', report_cancel())
         else:
             await edit_state_panel(message.from_id, message.peer_id, '🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nВведите название новой должности:', report_cancel())
         return True
@@ -852,17 +908,20 @@ async def handle_command(message: Message, text: str) -> bool:
         await bot.api.messages.send(peer_id=message.peer_id, message=text_perm, keyboard=permissions_keyboard(role_name, PERMISSION_CATALOG, selected), random_id=0)
         return True
 
-    if is_private_peer(message.peer_id):
-        await clean_user_response(message, '❌ Неизвестная команда. Используй /help.')
-    else:
-        await staff_panel_feedback(message.peer_id, '❌ Неизвестная команда. Используй /help.')
+    # Unknown commands never overwrite the shared leadership panel and never
+    # clutter a chat. The hint goes only to the sender's DM.
+    await clean_user_response(message, '❌ Неизвестная команда. Используй /help.')
     return True
 
 
 @bot.on.message()
 async def message_handler(message: Message):
     try:
+        # Old v1/v2 permanent keyboards can remain cached by VK clients even after
+        # deploying new code. Clear them on the first interaction in every peer.
+        asyncio.create_task(clear_legacy_keyboard(message.peer_id))
         text = strip_group_mention((message.text or '').strip())
+        # Wizard input has absolute priority over command parsing.
         if await process_state(message):
             return
         if await handle_command(message, text):
@@ -872,10 +931,10 @@ async def message_handler(message: Message):
         if is_private_peer(message.peer_id):
             low = text.lower()
             if low in {'начать', 'старт', 'меню'}:
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await show_helper_menu(message.peer_id, message.from_id)
             elif low == '📝 подать отчёт':
-                await safe_delete_message(message)
+                schedule_delete_message(message)
                 await start_report_flow(message.from_id, message.peer_id)
             # Unknown text in DM is ignored to avoid spam.
         # Unknown chat messages are always ignored.

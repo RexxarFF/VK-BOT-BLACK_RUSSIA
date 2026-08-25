@@ -33,12 +33,12 @@ PERMISSION_CATALOG = {
 
 DEFAULT_ROLES = {
     'Владелец': {
-        'level': 100,
+        'level': 10,
         'permissions': ['*'],
         'system': True,
     },
     'Главный Следящий': {
-        'level': 90,
+        'level': 9,
         'permissions': [
             'profile.view', 'contest.view', 'reports.submit',
             'users.view', 'users.add', 'users.remove',
@@ -51,7 +51,7 @@ DEFAULT_ROLES = {
         'system': True,
     },
     'Заместитель ГС': {
-        'level': 80,
+        'level': 8,
         'permissions': [
             'profile.view', 'contest.view', 'reports.submit',
             'users.view', 'users.add', 'users.remove',
@@ -63,7 +63,7 @@ DEFAULT_ROLES = {
         'system': True,
     },
     'Следящий': {
-        'level': 60,
+        'level': 6,
         'permissions': [
             'profile.view', 'contest.view', 'reports.submit',
             'users.view', 'users.add',
@@ -74,12 +74,12 @@ DEFAULT_ROLES = {
         'system': True,
     },
     'Старший Агент': {
-        'level': 40,
+        'level': 4,
         'permissions': ['profile.view', 'contest.view', 'reports.submit', 'users.view'],
         'system': True,
     },
     'Агент Поддержки': {
-        'level': 10,
+        'level': 1,
         'permissions': ['profile.view', 'contest.view', 'reports.submit'],
         'system': True,
     },

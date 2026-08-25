@@ -37,7 +37,7 @@ async def test_custom_role_permissions_and_assignment(tmp_path):
     await svc.bootstrap()
     await svc.ensure_user(1, 'Owner', registered=True)
     await svc.register_user(1, 2, 'Helper', 'Helper_Test')
-    await svc.create_role(1, 'Организатор', 55)
+    await svc.create_role(1, 'Организатор', 5)
     await svc.set_role_permissions(1, 'Организатор', ['contest.view', 'points.add'])
     await svc.assign_role(1, 2, 'Организатор')
 

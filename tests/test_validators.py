@@ -23,3 +23,15 @@ def test_nickname_and_points():
     assert parse_points('-2') == -2
     with pytest.raises(ValidationError):
         validate_nickname('Феликс')
+
+
+def test_role_level_range_is_1_to_10():
+    from app.validators import parse_level
+    from app.errors import ValidationError
+    assert parse_level('1') == 1
+    assert parse_level('10') == 10
+    import pytest
+    with pytest.raises(ValidationError):
+        parse_level('0')
+    with pytest.raises(ValidationError):
+        parse_level('11')

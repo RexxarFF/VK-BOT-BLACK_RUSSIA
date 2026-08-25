@@ -66,9 +66,9 @@ def parse_level(value: str | int) -> int:
     try:
         level = int(str(value).strip())
     except Exception as exc:
-        raise ValidationError('Уровень должности должен быть числом от 1 до 99.') from exc
-    if not 1 <= level <= 99:
-        raise ValidationError('Уровень должности должен быть от 1 до 99. Уровень 100 зарезервирован владельцу.')
+        raise ValidationError('Уровень должности должен быть числом от 1 до 10.') from exc
+    if not 1 <= level <= 10:
+        raise ValidationError('Уровень должности должен быть от 1 до 10.')
     return level
 
 
