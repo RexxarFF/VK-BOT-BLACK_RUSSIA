@@ -17,6 +17,19 @@ def cb(label: str, action: str, *, color: str = 'secondary', **payload) -> dict:
 
 
 def inline(rows: list[list[dict]]) -> str:
+    # VK inline keyboard hard limits: max 6 rows, max 5 buttons per row,
+    # and max 10 buttons total. Validate locally so we never send an invalid
+    # keyboard to VK and get API error 911.
+    if len(rows) > 6:
+        raise ValueError(f'Inline keyboard has too many rows: {len(rows)} > 6')
+    total = sum(len(row) for row in rows)
+    if total > 10:
+        raise ValueError(f'Inline keyboard has too many buttons: {total} > 10')
+    for row in rows:
+        if not row:
+            raise ValueError('Inline keyboard contains an empty row')
+        if len(row) > 5:
+            raise ValueError(f'Inline keyboard row has too many buttons: {len(row)} > 5')
     return json.dumps({'inline': True, 'buttons': rows}, ensure_ascii=False)
 
 
@@ -115,7 +128,7 @@ def contest_template_settings() -> str:
 
 
 def users_list(rows: list[dict], page: int = 0) -> str:
-    page_size = 8
+    page_size = 6
     pages = max(1, (len(rows) + page_size - 1) // page_size)
     page = max(0, min(page, pages - 1))
     chunk = rows[page * page_size:(page + 1) * page_size]
@@ -159,7 +172,7 @@ def remove_user_confirm(target: int) -> str:
 
 
 def members_list(rows: list[dict], page: int = 0, *, action: str = 'member_open', page_action: str = 'staff_members') -> str:
-    page_size = 8
+    page_size = 6
     pages = max(1, (len(rows) + page_size - 1) // page_size)
     page = max(0, min(page, pages - 1))
     chunk = rows[page * page_size:(page + 1) * page_size]
@@ -207,14 +220,19 @@ def points_user(target: int) -> str:
 
 
 
-def role_level_picker() -> str:
+def role_level_picker(page: int = 0) -> str:
+    # 10 level buttons + Cancel would exceed VK's 10-button limit.
+    # Split the selector into two compact pages.
+    if page <= 0:
+        return inline([
+            [cb('1', 'role_level_pick', level=1), cb('2', 'role_level_pick', level=2), cb('3', 'role_level_pick', level=3)],
+            [cb('4', 'role_level_pick', level=4), cb('5', 'role_level_pick', level=5)],
+            [cb('6–10 ➡️', 'role_level_page', page=1), cb('❌ Отмена', 'flow_cancel', color='negative')],
+        ])
     return inline([
-        [cb('1', 'role_level_pick', level=1), cb('2', 'role_level_pick', level=2)],
-        [cb('3', 'role_level_pick', level=3), cb('4', 'role_level_pick', level=4)],
-        [cb('5', 'role_level_pick', level=5), cb('6', 'role_level_pick', level=6)],
-        [cb('7', 'role_level_pick', level=7), cb('8', 'role_level_pick', level=8)],
+        [cb('6', 'role_level_pick', level=6), cb('7', 'role_level_pick', level=7), cb('8', 'role_level_pick', level=8)],
         [cb('9', 'role_level_pick', level=9), cb('10', 'role_level_pick', level=10)],
-        [cb('❌ Отмена', 'flow_cancel', color='negative')],
+        [cb('⬅️ 1–5', 'role_level_page', page=0), cb('❌ Отмена', 'flow_cancel', color='negative')],
     ])
 
 def roles_panel() -> str:
@@ -229,16 +247,19 @@ def roles_panel() -> str:
 
 def role_picker(roles: Iterable[str], action: str, *, target: int | None = None, page: int = 0) -> str:
     names = list(roles)
-    page_size = 8
+    page_size = 6
     pages = max(1, (len(names) + page_size - 1) // page_size)
     page = max(0, min(page, pages - 1))
     chunk = names[page * page_size:(page + 1) * page_size]
     buttons: list[list[dict]] = []
-    for name in chunk:
-        extra = {'role': name, 'page': page}
-        if target is not None:
-            extra['target'] = target
-        buttons.append([cb(name, action, **extra)])
+    for i in range(0, len(chunk), 2):
+        row: list[dict] = []
+        for name in chunk[i:i + 2]:
+            extra = {'role': name, 'page': page}
+            if target is not None:
+                extra['target'] = target
+            row.append(cb(name, action, **extra))
+        buttons.append(row)
     nav = []
     if page > 0:
         nav.append(cb('⬅️', 'role_picker_page', mode=action, target=target or 0, page=page - 1))
@@ -252,7 +273,7 @@ def role_picker(roles: Iterable[str], action: str, *, target: int | None = None,
 
 def permissions_keyboard(role: str, catalog: dict[str, str], selected: set[str], page: int = 0) -> str:
     items = list(catalog.items())
-    page_size = 6
+    page_size = 4
     pages = max(1, (len(items) + page_size - 1) // page_size)
     page = max(0, min(page, pages - 1))
     buttons: list[list[dict]] = []

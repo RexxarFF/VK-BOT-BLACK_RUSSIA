@@ -18,9 +18,10 @@ def assert_keyboard(raw: str):
     data = json.loads(raw)
     assert data['inline'] is True
     assert data['buttons']
-    assert len(data['buttons']) <= 10
+    assert len(data['buttons']) <= 6
+    assert sum(len(row) for row in data['buttons']) <= 10
     for row in data['buttons']:
-        assert 1 <= len(row) <= 4
+        assert 1 <= len(row) <= 5
         for button in row:
             payload = json.loads(button['action']['payload'])
             assert payload['action']
@@ -33,7 +34,8 @@ def test_main_keyboards_are_valid_json():
     assert_keyboard(leadership_main())
     assert_keyboard(report_chat_panel())
     assert_keyboard(points_user(123))
-    assert_keyboard(role_level_picker())
+    assert_keyboard(role_level_picker(0))
+    assert_keyboard(role_level_picker(1))
     assert_keyboard(user_card(123, in_contest=True))
 
 

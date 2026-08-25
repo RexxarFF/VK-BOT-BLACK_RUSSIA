@@ -21,7 +21,7 @@ from app.bot import bot, svc, migrate_legacy_ui
 async def main():
     await svc.bootstrap()
     await migrate_legacy_ui()
-    logger.info('Запуск VK-бота Агентов Поддержки v3.3')
+    logger.info('Запуск VK-бота Агентов Поддержки v3.5')
     logger.info('Бот работает через VK Long Poll.')
     try:
         await bot.run_polling()

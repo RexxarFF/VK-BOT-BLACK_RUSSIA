@@ -50,7 +50,7 @@ bot.labeler.message_view.replace_mention = True
 store = JsonStore(settings.data_dir)
 svc = AppService(store, settings.owner_ids)
 
-UI_SCHEMA_VERSION = 33
+UI_SCHEMA_VERSION = 35
 
 # Text-input wizards. Key: (vk_user_id, peer_id)
 states: dict[tuple[int, int], dict] = {}
@@ -804,6 +804,16 @@ def split_vk_target(raw_command_text: str, command: str) -> tuple[str, str]:
     return first, tail.strip() if sep else ''
 
 
+PUBLIC_COMMANDS = {
+    '/start', '/menu', '/help', '/profile', '/top', '/ranking', '/report', '/cancel',
+}
+STAFF_COMMANDS = {
+    '/panel', '/setchat', '/adduser', '/addmember', '/delmember', '/points',
+    '/newcontest', '/finishcontest', '/addrole', '/setrole', '/roles', '/setperm',
+}
+KNOWN_COMMANDS = PUBLIC_COMMANDS | STAFF_COMMANDS
+
+
 async def handle_command(message: Message, text: str) -> bool:
     if not text.startswith('/'):
         return False
@@ -811,10 +821,17 @@ async def handle_command(message: Message, text: str) -> bool:
         parts = shlex.split(text)
     except ValueError:
         parts = text.split()
+    if not parts:
+        return True
     command = parts[0].lower()
     args = parts[1:]
 
-    # Commands are control input, not chat history. Remove them whenever VK allows it.
+    # Unknown slash commands are intentionally COMPLETELY silent.
+    # Do not answer, do not show an error and do not mutate the current panel.
+    if command not in KNOWN_COMMANDS:
+        return True
+
+    # Known commands are control input, not chat history. Remove them where VK allows it.
     schedule_delete_message(message)
 
     if command in {'/start', '/menu'}:
@@ -823,6 +840,10 @@ async def handle_command(message: Message, text: str) -> bool:
             return True
         schedule_delete_message(message)
         await show_helper_menu(message.peer_id, message.from_id)
+        return True
+
+    if command == '/cancel':
+        # Outside an active wizard there is nothing to cancel. Stay silent.
         return True
 
     if command == '/help':
@@ -878,10 +899,10 @@ async def handle_command(message: Message, text: str) -> bool:
         await start_report_flow(message.from_id, message.peer_id)
         return True
 
-    # Staff-only commands from here. Unknown/administrative commands from a helper
-    # are answered privately so report chats stay clean.
+    # Only KNOWN staff commands reach this point. A typo/unknown command was already
+    # swallowed above with absolutely no response.
     if not await svc.is_staff(message.from_id):
-        await clean_user_response(message, '❌ Эта команда доступна только руководству. Используй /help для своих команд.')
+        await clean_user_response(message, '❌ Эта команда доступна только руководству.')
         return True
 
     if command == '/panel':
@@ -1020,8 +1041,7 @@ async def handle_command(message: Message, text: str) -> bool:
         await bot.api.messages.send(peer_id=message.peer_id, message=text_perm, keyboard=permissions_keyboard(role_name, PERMISSION_CATALOG, selected), random_id=0)
         return True
 
-    # Неизвестные команды намеренно игнорируются. Никаких сообщений
-    # «Не понял команду» / «Неизвестная команда» бот не отправляет.
+    # Defensive fallback: a known command with no branch is still silent.
     return True
 
 
@@ -1348,6 +1368,21 @@ async def callback_handler(event: MessageEvent):
             await svc.require(user_id, 'roles.create')
             states[state_key(user_id, peer_id)] = {'kind': 'role_create', 'step': 1, 'data': {}, 'panel_cmid': cmid}
             await event_edit(event, '🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nВведите название новой должности:', report_cancel())
+            return
+
+        if action == 'role_level_page':
+            await svc.require(user_id, 'roles.create')
+            st = states.get(state_key(user_id, peer_id))
+            if not st or st.get('kind') != 'role_create' or int(st.get('step', 0)) != 2:
+                await snackbar(event, 'Форма создания должности устарела. Открой её заново.')
+                return
+            page = 1 if int(payload.get('page', 0)) > 0 else 0
+            name = st.get('data', {}).get('name', '')
+            await event_edit(
+                event,
+                f'🎭 СОЗДАНИЕ ДОЛЖНОСТИ\n\nНазвание: {name}\n\nВыбери уровень должности от 1 до 10:',
+                role_level_picker(page),
+            )
             return
 
         if action == 'role_level_pick':
