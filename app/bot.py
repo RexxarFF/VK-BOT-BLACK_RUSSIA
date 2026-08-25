@@ -57,6 +57,9 @@ permission_sessions: dict[tuple[int, int, str], set[str]] = {}
 dm_panels: dict[int, int] = {}
 # Peers where an obsolete persistent keyboard from v1/v2 has already been cleared.
 legacy_keyboard_cleared: set[int] = set()
+# Some VK conversations do not allow a community bot to delete peer messages.
+# Once VK explicitly denies it for a peer, stop retrying there to avoid API spam/rate limits.
+delete_input_disabled_peers: set[int] = set()
 
 
 def is_private_peer(peer_id: int) -> bool:
@@ -100,17 +103,52 @@ async def display_name(vk_id: int) -> str:
     return f'VK {vk_id}'
 
 
-async def safe_delete_message(message: Message):
-    """Best-effort cleanup. VK may refuse deletion depending on chat rights/client rules."""
+async def safe_delete_message(message: Message) -> bool:
+    """Best-effort removal of a user's input message.
+
+    For community bots VK can reject deletion by global ``message_id`` with
+    error 15 ("peer message"). For an incoming message we therefore address
+    it by the conversation-local id (cmid) together with peer_id. If VK still
+    denies deletion for this peer, remember that and stop retrying there so
+    form handling stays fast and logs do not fill with the same API error.
+    """
+    peer_id = int(getattr(message, 'peer_id', 0) or 0)
+    if not peer_id or peer_id in delete_input_disabled_peers:
+        return False
+
+    cmid = int(getattr(message, 'conversation_message_id', 0) or 0)
+    if not cmid:
+        return False
+
     try:
-        if getattr(message, 'id', 0):
-            await bot.api.messages.delete(message_ids=[int(message.id)], delete_for_all=1)
-    except Exception:
-        pass
+        await bot.api.messages.delete(
+            peer_id=peer_id,
+            cmids=[cmid],
+            delete_for_all=1,
+        )
+        return True
+    except Exception as exc:
+        code = getattr(exc, 'code', None)
+        text = str(getattr(exc, 'error_msg', '') or exc).lower()
+        if code == 15 or 'message can not be deleted' in text or 'peer message' in text:
+            delete_input_disabled_peers.add(peer_id)
+            logger.debug(
+                'VK запретил удалять входящие сообщения в peer {}. '
+                'Дальнейшие попытки удаления для этого peer отключены.',
+                peer_id,
+            )
+            return False
+        logger.debug('Не удалось удалить входящее сообщение в peer {}: {}', peer_id, exc)
+        return False
 
 
 def schedule_delete_message(message: Message) -> None:
-    """Delete user input in background so UI updates are not delayed by an extra VK API request."""
+    """Queue cleanup without delaying the next form/UI response."""
+    peer_id = int(getattr(message, 'peer_id', 0) or 0)
+    if not peer_id or peer_id in delete_input_disabled_peers:
+        return
+    if not int(getattr(message, 'conversation_message_id', 0) or 0):
+        return
     try:
         asyncio.create_task(safe_delete_message(message))
     except RuntimeError:
